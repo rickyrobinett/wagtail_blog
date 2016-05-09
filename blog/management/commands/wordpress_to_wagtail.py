@@ -14,12 +14,10 @@ from django.core.management.base import BaseCommand, CommandError
 from django.core.files import File
 from django.contrib.auth import get_user_model
 User = get_user_model()
+
 from django.contrib.auth.models import User
-from django_comments_xtd.models import XtdComment
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.sites.models import Site
-from django_comments_xtd.models import MaxThreadLevelExceededException
-
 
 from bs4 import BeautifulSoup
 import requests
@@ -75,11 +73,19 @@ class Command(BaseCommand):
 
         self.xml_path = options.get('xml')
         self.url = options.get('url')
+        self.should_import_comments = options.get('import_comments')
+
+        if self.should_import_comments:
+            from django_comments_xtd.models import MaxThreadLevelExceededException
+            from django_comments_xtd.models import XtdComment
+
         try:
             blog_index = BlogIndexPage.objects.get(
                 title__icontains=options['blog_index'])
+
         except BlogIndexPage.DoesNotExist:
             raise CommandError("Have you created an index yet?")
+
         if self.url == "just_testing":
             with open('test-data.json') as test_json:
                 posts = json.load(test_json)
@@ -94,7 +100,6 @@ class Command(BaseCommand):
             posts = XML_parser(self.xml_path).get_posts_data()
         else:
             posts = self.get_posts_data(self.url)
-        self.should_import_comments = options.get('import_comments')
         self.create_blog_pages(posts, blog_index)
 
     def prepare_url(self, url):
@@ -140,7 +145,6 @@ class Command(BaseCommand):
         else:
             base_url = ''.join(('http://', self.url))
         posts_url = ''.join((base_url, '/wp-json/posts'))
-        comments_url = ''.join((posts_url, '/%s/comments')) % id
         if get_comments is True:
             comments_url = ''.join((posts_url, '/%s/comments')) % id
             fetched_comments = requests.get(comments_url)
