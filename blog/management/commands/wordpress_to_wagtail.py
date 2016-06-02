@@ -9,7 +9,6 @@ import json
 import os
 import urllib.request
 
-
 from django.core.management.base import BaseCommand, CommandError
 from django.core.files import File
 from django.contrib.auth import get_user_model
@@ -17,7 +16,7 @@ User = get_user_model()
 
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
-from django.contrib.sites.models import Site
+
 
 from bs4 import BeautifulSoup
 import requests
@@ -226,6 +225,7 @@ class Command(BaseCommand):
 
     def import_comments(self, post_id, slug, *args, **options):
         try:
+            from django.contrib.sites.models import Site
             mysite = Site.objects.get_current()
             self.site_id = mysite.id
         except Site.DoesNotExist:
