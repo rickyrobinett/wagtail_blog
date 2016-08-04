@@ -224,6 +224,10 @@ class Command(BaseCommand):
                 return comment
 
     def import_comments(self, post_id, slug, *args, **options):
+        from django_comments_xtd.models import MaxThreadLevelExceededException
+        from django_comments_xtd.models import XtdComment
+
+        # import django-comments-xtd
         try:
             from django.contrib.sites.models import Site
             mysite = Site.objects.get_current()
