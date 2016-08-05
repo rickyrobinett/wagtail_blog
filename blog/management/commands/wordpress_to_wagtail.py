@@ -9,6 +9,8 @@ import json
 import os
 import urllib.request
 
+import tempfile
+import logging
 
 from django.core.management.base import BaseCommand, CommandError
 from django.core.files import File
@@ -62,40 +64,30 @@ class Command(BaseCommand):
                             help="import from XML instead of API")
 
     def handle(self, *args, **options):
-        """gets data from WordPress site"""
-        # TODO: refactor these with .get
-        if 'username' in options:
-            self.username = options['username']
-        else:
-            self.username = None
-        if 'password' in options:
-            self.password = options['password']
-        else:
-            self.password = None
+      self.xml_path = options.get('xml')
+      self.url = options.get('url')
+      self.username = None
+      self.password = None
+      self.should_import_comments = False
 
-        self.xml_path = options.get('xml')
-        self.url = options.get('url')
-        try:
-            blog_index = BlogIndexPage.objects.get(
-                title__icontains=options['blog_index'])
-        except BlogIndexPage.DoesNotExist:
-            raise CommandError("Have you created an index yet?")
-        if self.url == "just_testing":
-            with open('test-data.json') as test_json:
-                posts = json.load(test_json)
-        elif self.xml_path:
-            try:
-                import lxml
-                from blog.wp_xml_parser import XML_parser
-            except ImportError as e:
-                print("You must have lxml installed to run xml imports."
-                      " Run `pip install lxml`.")
-                raise e
-            posts = XML_parser(self.xml_path).get_posts_data()
-        else:
-            posts = self.get_posts_data(self.url)
-        self.should_import_comments = options.get('import_comments')
-        self.create_blog_pages(posts, blog_index)
+      try:
+          self.blog_index = BlogIndexPage.objects.get(
+              title__icontains=options['blog_index'])
+      except BlogIndexPage.DoesNotExist:
+          raise CommandError("Have you created an index yet?")
+     
+      self.import_wp_data(args, options)
+    
+    def import_wp_data(self, args, options):
+        """gets data from WordPress site"""
+        page = 1
+        posts = self.get_posts_data(self.url, page)
+        while posts:
+          self.create_blog_pages(posts, self.blog_index)
+          page = page + 1
+          posts = self.get_posts_data(self.url, page)
+          
+        #self.should_import_comments = options.get('import_comments')
 
     def prepare_url(self, url):
         if url.startswith('//'):
@@ -119,8 +111,9 @@ class Command(BaseCommand):
             data = data.strip(bad_data)
         return data
 
+
     def get_posts_data(
-        self, blog, id=None, get_comments=False, *args, **options
+        self, blog, page, id=None, get_comments=False, *args, **options
     ):
         if self.url == "just_testing":
             with open('test-data-comments.json') as test_json:
@@ -130,12 +123,13 @@ class Command(BaseCommand):
         headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
+            'User-Agent': "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.153 Safari/537.36 SE 2.X MetaSr 1.0"
         }
         if self.username and self.password:
             auth = b64encode(
                 str.encode('{}:{}'.format(self.username, self.password)))
             headers['Authorization'] = 'Basic {}'.format(auth)
-        if self.url.startswith('http://'):
+        if self.url.startswith('https://'):
             base_url = self.url
         else:
             base_url = ''.join(('http://', self.url))
@@ -148,18 +142,36 @@ class Command(BaseCommand):
             comments_data = self.clean_data(comments_data)
             return json.loads(comments_data)
         else:
+            posts_url = ''.join((base_url, '/wp-json/posts'))
             fetched_posts = requests.get(posts_url +
-                                         '?filter[posts_per_page]=-1',
-                                         headers=headers)
+                                           '?filter[posts_per_page]=5&page='+ str(page),
+                                           headers=headers)
+            print(posts_url + '?filter[posts_per_page]=5&page='+ str(page))
             data = fetched_posts.text
             data = self.clean_data(data)
-            return json.loads(data)
+            lJson = json.loads(data)
+            if len(lJson) > 0 and page < 2:
+              return lJson
+            else:
+              return False
+
+    def format_code_in_content(self, body):
+        """convert WP crayon elements into ACE editor elements"""
+        soup = BeautifulSoup(body, "html5lib")
+        for block in soup.findAll("div", { "class" : "crayon-syntax" }):
+          new_tag = soup.new_tag("div", **{'class':'codehilite'})
+          new_tag.string = block.find("textarea").contents[0]
+          block.replaceWith(new_tag)
+        return str(soup)
+
+    def replace_twilioinc_urls(self, body):
+      return body.replace("twilioincricky.wpengine.com","www.twilio.com/blog")
+
 
     def create_images_from_urls_in_content(self, body):
         """create Image objects and transfer image files to media root"""
         soup = BeautifulSoup(body, "html5lib")
         for img in soup.findAll('img'):
-            old_url = img['src']
             if 'width' in img:
                 width = img['width']
             if 'height' in img:
@@ -167,39 +179,67 @@ class Command(BaseCommand):
             else:
                 width = 100
                 height = 100
-            path, file_ = os.path.split(img['src'])
-            if not img['src']:
-                continue  # Blank image
-            if img['src'].startswith('data:'):
-                continue # Embedded image
             try:
-                remote_image = urllib.request.urlretrieve(
-                    self.prepare_url(img['src']))
+                path, file_ = os.path.split(img['src'])
+                if not img['src']:
+                    continue  # Blank image
+                if img['src'].startswith('data:'):
+                    continue # Embedded image
+
+                old_url = img['src']
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.153 Safari/537.36 SE 2.X MetaSr 1.0"
+                }
+                req = requests.get(self.prepare_url(img['src']), headers=headers, timeout=10)
+                if req.status_code == 200:
+                    remote_image = tempfile.NamedTemporaryFile()
+                    remote_image.write(req.content)
+                else:
+                    remote_image = None
             except (urllib.error.HTTPError,
                     urllib.error.URLError,
-                    UnicodeEncodeError):
-                print("Unable to import " + img['src'])
+                    UnicodeEncodeError,
+                    requests.exceptions.SSLError, 
+                    KeyError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.MissingSchema,
+                    requests.exceptions.InvalidSchema,
+                    requests.exceptions.InvalidURL):
+                logging.warning("Unable to import image: " + img['src'])
                 continue
+            if len(file_) > 255:
+              file_ = file_[:255]
             image = Image(title=file_, width=width, height=height)
             try:
-                image.file.save(file_, File(open(remote_image[0], 'rb')))
-                image.save()
-                new_url = image.file.url
-                body = body.replace(old_url, new_url)
+                if remote_image and os.path.getsize(remote_image.name) > 0:
+                  #TODO: Log error of files that don't import for manual fix
+                  imageFile = File(open(remote_image.name, 'rb'))
+                  image.file.save(file_, imageFile)
+                  image.save()
+                  remote_image.close()
+                  new_url = image.file.url
+                  body = body.replace(old_url, new_url)
                 body = self.convert_html_entities(body)
             except TypeError:
-                print("Unable to import image {}".format(remote_image[0]))
+                logging.warning("Unable to import image: " + img['src'])
+                #print("Unable to import image {}".format(remote_image[0]))
+                pass
         return body
 
     def create_user(self, author):
-        username = author['username']
+        #TODO: Set proper group permissions
+        username = author['username'] + '@twilio.com'
         first_name = author['first_name']
         last_name = author['last_name']
         try:
             user = User.objects.get(username=username)
         except User.DoesNotExist:
             user = User.objects.create_user(
-                username=username, first_name=first_name, last_name=last_name)
+                username=username, first_name=first_name, last_name=last_name, email=username)
+        user.groups.add(10)
+        user.save()
         return user
 
     def create_comment(
@@ -284,7 +324,7 @@ class Command(BaseCommand):
         for records in categories.values():
             if records[0]['taxonomy'] == 'post_tag':
                 for record in records:
-                    tag_name = record['name']
+                    tag_name = record['name'].lower()
                     new_tag = BlogTag.objects.get_or_create(name=tag_name)[0]
                     tags_for_blog_entry.append(new_tag)
 
@@ -317,18 +357,22 @@ class Command(BaseCommand):
     def create_blog_pages(self, posts, blog_index, *args, **options):
         """create Blog post entries from wordpress data"""
         for post in posts:
-            post_id = post.get('ID')
             title = post.get('title')
+            print(title)
             if title:
                 new_title = self.convert_html_entities(title)
                 title = new_title
-            slug = post.get('slug')
+            # TODO: Fix hardcoded replacement
+            slug = post.get('slug') + "-html"
+
             description = post.get('description')
             if description:
                 description = self.convert_html_entities(description)
             body = post.get('content')
             # get image info from content and create image objects
             body = self.create_images_from_urls_in_content(body)
+            body = self.format_code_in_content(body)
+            body = self.replace_twilioinc_urls(body)
             # author/user data
             author = post.get('author')
             user = self.create_user(author)
@@ -340,26 +384,43 @@ class Command(BaseCommand):
                 new_entry.title = title
                 new_entry.body = body
                 new_entry.owner = user
+                new_entry.author = user
                 new_entry.save()
             except BlogPage.DoesNotExist:
                 new_entry = blog_index.add_child(instance=BlogPage(
                     title=title, slug=slug, search_description="description",
-                    date=date, body=body, owner=user))
+                    date=date, body=body, owner=user, author=user))
+                print("Owner:")
+                print(new_entry.owner)
             featured_image = post.get('featured_image')
-            if featured_image is not None:
-                title = post['featured_image']['title']
+            header_image = None
+            if featured_image is not None and "source" in post['featured_image']:
+                if 'title' in post['featured_image']:
+                  title = post['featured_image']['title']
+                else:
+                  title = "Featured Image"
                 source = post['featured_image']['source']
                 path, file_ = os.path.split(source)
                 source = source.replace('stage.swoon', 'swoon')
                 try:
-                    remote_image = urllib.request.urlretrieve(
-                        self.prepare_url(source))
+                    headers = {
+                          'Content-Type': 'application/json',
+                          'Accept': 'application/json',
+                          'User-Agent': "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.153 Safari/537.36 SE 2.X MetaSr 1.0"
+                    }
+                    req = requests.get(self.prepare_url(source), headers=headers, timeout=10)
+                    remote_image = tempfile.NamedTemporaryFile()
+                    remote_image.write(req.content)
+                    #remote_image = urllib.request.urlretrieve(
+                    #    self.prepare_url(source))
                     width = 640
                     height = 290
-                    header_image = Image(title=title, width=width, height=height)
-                    header_image.file.save(
-                        file_, File(open(remote_image[0], 'rb')))
-                    header_image.save()
+                    if os.path.getsize(remote_image.name):
+                      #TODO: Capture error for manual download
+                      header_image = Image(title=title, width=width, height=height)
+                      header_image.file.save(
+                          file_, File(open(remote_image.name, 'rb')))
+                      header_image.save()
                 except UnicodeEncodeError:
                     header_image = None
                     print('unable to set header image {}'.format(source))
