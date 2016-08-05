@@ -144,9 +144,9 @@ class Command(BaseCommand):
         else:
             posts_url = ''.join((base_url, '/wp-json/posts'))
             fetched_posts = requests.get(posts_url +
-                                           '?filter[posts_per_page]=5&page='+ str(page),
+                                           '?filter[posts_per_page]=20&page='+ str(page),
                                            headers=headers)
-            print(posts_url + '?filter[posts_per_page]=5&page='+ str(page))
+            print(posts_url + '?filter[posts_per_page]=20&page='+ str(page))
             data = fetched_posts.text
             data = self.clean_data(data)
             lJson = json.loads(data)
