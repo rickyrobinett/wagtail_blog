@@ -12,6 +12,7 @@ except ImportError:  # 2.x
 import json
 import os
 import urllib.request
+import re
 
 import tempfile
 import logging
@@ -34,6 +35,8 @@ import requests
 from blog.models import (BlogPage, BlogTag, BlogPageTag, BlogIndexPage,
                          BlogCategory, BlogCategoryBlogPage)
 from wagtail.wagtailimages.models import Image
+
+from xml.sax.saxutils import unescape
 
 
 def migrate_blog_content(apps, schema_editor):
@@ -126,23 +129,59 @@ class BlogMigrator():
             data = fetched_posts.text
             data = self.clean_data(data)
             lJson = json.loads(data)
-            if len(lJson) > 0 and page < 2:
+            if len(lJson) > 0 and page < 4:
               return lJson
             else:
               return False
 
     def format_code_in_content(self, body):
-        """convert WP crayon elements into ACE editor elements"""
+        """convert WP crayon elements into markdown for code snippets """
         soup = BeautifulSoup(body, "html5lib")
         for block in soup.findAll("div", { "class" : "crayon-syntax" }):
+          # Figure out what lines of code are highlighted
+          lines = block.findAll('div', {'class' : 'crayon-line'})
+          i = 1
+          marked_lines = []
+          for line in lines:
+            if "crayon-marked-line" in line['class']:
+              marked_lines.append(i) 
+            i = i + 1
           new_tag = soup.new_tag("div")
-          new_tag.string = '~~~.php\n' + block.find("textarea").contents[0] + '\n~~~'
+          language = block.find({ "class" : "crayon-language" })
+          if language is None:
+            language = "python"
+          if marked_lines:
+            language = language + ' hl_lines="' + str(marked_lines).strip('[]').replace(',', ' ') + '"'
+          else:
+            language = language
+          new_tag.string = '```' + language + '\n' + block.find("textarea").contents[0] + '\n```'
           block.replaceWith(new_tag)
         return str(soup)
 
     def replace_twilioinc_urls(self, body):
       return body.replace("twilioincricky.wpengine.com","www.twilio.com/blog")
 
+    def body_to_stream_field(self, body):
+      split_body = re.split('(\```)', body)
+      json_object = []
+      markdown = False
+      elm_string = ''
+      for elm in split_body:
+          if markdown:
+              if elm == '```':
+                  markdown = False
+                  json_object.append({'type': 'markdown', 'value': elm_string + elm})
+                  elm_string = ''
+              else:
+                  elm_string = elm_string + unescape(elm)
+          else:
+              if elm == '```':
+                  markdown = True
+                  elm_string = elm
+              else:
+                json_object.append({'type': 'rich_text', 'value': elm})
+
+      return json.dumps(json_object)
 
     def create_images_from_urls_in_content(self, body):
         """create Image objects and transfer image files to media root"""
@@ -356,10 +395,11 @@ class BlogMigrator():
             categories = post.get('terms')
             # format the date
             date = post.get('date')[:10]
+            body = self.body_to_stream_field(body)
             try:
                 new_entry = BlogPage.objects.get(slug=slug)
                 new_entry.title = title
-                new_entry.body.markdown = body
+                new_entry.body = body
                 new_entry.owner = user
                 new_entry.author = user
                 new_entry.save()
