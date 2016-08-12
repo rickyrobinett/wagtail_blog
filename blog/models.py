@@ -14,6 +14,10 @@ from wagtail.wagtailadmin.edit_handlers import (
 from wagtail.wagtailimages.edit_handlers import ImageChooserPanel
 from wagtail.wagtailsnippets.models import register_snippet
 from wagtail.wagtailsearch import index
+from wagtail.wagtailcore.fields import StreamField
+from wagtail.wagtailcore import blocks
+from wagtail.wagtailsnippets.blocks import SnippetChooserBlock
+from wagtail.wagtailadmin.edit_handlers import StreamFieldPanel
 from taggit.models import TaggedItemBase, Tag
 from modelcluster.tags import ClusterTaggableManager
 from modelcluster.fields import ParentalKey
@@ -190,13 +194,20 @@ def limit_author_choices():
 
 
 class BlogPage(Page):
-    body = RichTextField(verbose_name=_('body'), blank=True)
     tags = ClusterTaggableManager(through=BlogPageTag, blank=True)
     date = models.DateField(
         _("Post date"), default=datetime.datetime.today,
         help_text=_("This date may be displayed on the blog post. It is not "
                     "used to schedule posts to go live at a later date.")
     )
+    body = StreamField([
+        ('rich_text', blocks.RichTextBlock(icon='edit')),
+        ('markdown', blocks.TextBlock(icon='form', template='core/markdown.html')),
+    ])
+
+    search_fields = Page.search_fields + [
+        index.SearchField('body', partial_match=True),
+    ]
     header_image = models.ForeignKey(
         'wagtailimages.Image',
         null=True,
@@ -264,5 +275,5 @@ BlogPage.content_panels = [
         InlinePanel('categories', label=_("Categories")),
     ], heading="Tags and Categories"),
     ImageChooserPanel('header_image'),
-    FieldPanel('body', classname="full"),
+    StreamFieldPanel('body')
 ]
