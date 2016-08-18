@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-from django.db import migrations, models
+from django.db import migrations, models, IntegrityError, transaction
+
+import django
 from base64 import b64encode
 from datetime import datetime
 try:
@@ -123,13 +125,13 @@ class BlogMigrator():
         else:
             posts_url = ''.join((base_url, '/wp-json/posts'))
             fetched_posts = requests.get(posts_url +
-                                           '?filter[posts_per_page]=20&page='+ str(page),
+                                           '?filter[posts_per_page]=50&page='+ str(page),
                                            headers=headers)
-            print(posts_url + '?filter[posts_per_page]=20&page='+ str(page))
+            print(posts_url + '?filter[posts_per_page]=50&page='+ str(page))
             data = fetched_posts.text
             data = self.clean_data(data)
             lJson = json.loads(data)
-            if len(lJson) > 0 and page < 4:
+            if len(lJson) > 0:
               return lJson
             else:
               return False
@@ -154,7 +156,10 @@ class BlogMigrator():
             language = language + ' hl_lines="' + str(marked_lines).strip('[]').replace(',', ' ') + '"'
           else:
             language = language
-          new_tag.string = '```' + language + '\n' + block.find("textarea").contents[0] + '\n```'
+          
+          if len(block.find("textarea").contents):
+            new_tag.string = '```' + language + '\n' + block.find("textarea").contents[0] + '\n```'
+
           block.replaceWith(new_tag)
         return str(soup)
 
@@ -213,6 +218,7 @@ class BlogMigrator():
                     remote_image.write(req.content)
                 else:
                     remote_image = None
+                    continue
             except (urllib.error.HTTPError,
                     urllib.error.URLError,
                     UnicodeEncodeError,
@@ -221,31 +227,56 @@ class BlogMigrator():
                     requests.exceptions.ConnectionError,
                     requests.exceptions.MissingSchema,
                     requests.exceptions.InvalidSchema,
-                    requests.exceptions.InvalidURL):
-                logging.warning("Unable to import image: " + img['src'])
+                    requests.exceptions.InvalidURL,
+                    requests.exceptions.TooManyRedirects,
+                    requests.exceptions.ReadTimeout):
+                #logging.warning("Unable to import image: " + img['src'])
                 continue
             if len(file_) > 255:
               file_ = file_[:255]
             image = Image(title=file_, width=width, height=height)
             try:
-                if remote_image and os.path.getsize(remote_image.name) > 0:
-                  #TODO: Log error of files that don't import for manual fix
-                  imageFile = File(open(remote_image.name, 'rb'))
-                  image.file.save(file_, imageFile)
-                  image.save()
-                  remote_image.close()
-                  new_url = image.file.url
-                  body = body.replace(old_url, new_url)
-                body = self.convert_html_entities(body)
+                with transaction.atomic():
+                    if remote_image and os.path.getsize(remote_image.name) > 0:
+                      #TODO: Log error of files that don't import for manual fix
+                      imageFile = File(open(remote_image.name, 'rb'))
+                      image.file.save(file_, imageFile)
+                      image.save()
+                      remote_image.close()
+                      new_url = image.file.url
+                      body = body.replace(old_url, new_url)
+                    body = self.convert_html_entities(body)
             except TypeError:
                 logging.warning("Unable to import image: " + img['src'])
-                #print("Unable to import image {}".format(remote_image[0]))
+            except django.db.utils.IntegrityError:
+                logging.warning("Unable to import image: " + img['src'])
+                #image.delete()
                 pass
         return body
 
     def create_user(self, author):
         #TODO: Set proper group permissions
-        username = author['username'] + '@twilio.com'
+        username_lookup = {
+          'Al Cook' : 'acook@twilio.com',
+          'devinrader' : 'devin@twilio.com',
+          'Phil' : 'pnash@twilio.com',
+          'Marcos' : 'mplacona@twilio.com',
+          'dominik' : 'dkundel@twilio.com',
+          'DavidP' : 'dprothero@twilio.com',
+          'kevinwhinnery' : 'kwhinnery@twilio.com',
+          'Ari' : 'asigal@twilio.com',
+          'Brent Schooley' : 'bschooley@twilio.com',
+          'Jeff Lawson' : 'jeffiel@twilio.com',
+          'SamAgnew' : 'sagnew@twilio.com',
+          'Jarod' : 'jreyes@twilio.com',
+          'rickyr' : 'rrobinett@twilio.com',
+          'Greg Baugues' : 'gbaugues@twilio.com',
+        }
+        if author['username'] in username_lookup:
+          username = username_lookup[author['username']]
+        else:
+          username = author['username'].lower() + '@twilio.com'
+
         first_name = author['first_name']
         last_name = author['last_name']
         try:
@@ -395,6 +426,9 @@ class BlogMigrator():
             categories = post.get('terms')
             # format the date
             date = post.get('date')[:10]
+            search_description = post.get('excerpt')
+            if not search_description:
+              search_description = title
             body = self.body_to_stream_field(body)
             try:
                 new_entry = BlogPage.objects.get(slug=slug)
@@ -402,13 +436,12 @@ class BlogMigrator():
                 new_entry.body = body
                 new_entry.owner = user
                 new_entry.author = user
+                new_entry.search_description = search_description
                 new_entry.save()
             except BlogPage.DoesNotExist:
                 new_entry = blog_index.add_child(instance=BlogPage(
-                    title=title, slug=slug, search_description="description",
+                    title=title, slug=slug, search_description=search_description,
                     date=date, body=body, owner=user, author=user))
-                print("Owner:")
-                print(new_entry.owner)
             featured_image = post.get('featured_image')
             header_image = None
             if featured_image is not None and "source" in post['featured_image']:
@@ -438,7 +471,8 @@ class BlogMigrator():
                       header_image.file.save(
                           file_, File(open(remote_image.name, 'rb')))
                       header_image.save()
-                except UnicodeEncodeError:
+                except (UnicodeEncodeError, 
+                        requests.exceptions.ConnectionError):
                     header_image = None
                     print('unable to set header image {}'.format(source))
             else:
