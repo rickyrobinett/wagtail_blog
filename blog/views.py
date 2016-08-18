@@ -16,6 +16,7 @@ def category_view(request, category):
 
 
 def author_view(request, author):
+    author = author + "@twilio.com"
     index = BlogIndexPage.objects.first()
     return index.serve(request, author=author)
 
